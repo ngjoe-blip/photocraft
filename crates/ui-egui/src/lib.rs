@@ -55,6 +55,7 @@ pub mod dock;
 pub mod enable_rules;
 pub mod eraser_ui;
 pub mod export_dialog;
+pub mod field_tab;
 pub mod file_dialog;
 pub mod file_open;
 pub mod file_ui;
