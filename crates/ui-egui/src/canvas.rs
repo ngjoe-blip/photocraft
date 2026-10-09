@@ -2252,6 +2252,9 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         None if middle => Tool::Hand,
         None => app.ui.tool,
     };
+    // ⌘ held: this frame's gestures go to the Move tool (`PhotocraftApp::active_tool`). The Hand
+    // and Zoom never reach `tool_event`, so only the Move needs the state machine to know.
+    app.tool_override = (temporary == Some(crate::hold_keys::Temporary::Move)).then_some(Tool::Move);
     // Zoom direction: the temporary zoom key decides, else ⌥ (Zoom tool).
     let zoom_out = |alt: bool| match temporary {
         Some(crate::hold_keys::Temporary::ZoomOut) => true,
@@ -2571,11 +2574,31 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             ui.ctx().set_cursor_icon(c);
         } else if let Some(c) = response.hover_pos().filter(|_| tool == Tool::Crop).and_then(|p| crate::crop_ui::cursor(app, xf.to_doc(p))) {
             ui.ctx().set_cursor_icon(c);
-        } else if app.drag.as_ref().is_some_and(|d| d.sel_move.is_some())
-            || response.hover_pos().is_some_and(|p| app.drag.is_none() && selection_drag_kind(app, tool, xf.to_doc(p), ui.input(|i| i.modifiers)).is_some())
+        } else if let Some(p) = response.hover_pos()
+            && let Some(c) = selection_cursor(app, tool, xf.to_doc(p), crate::workspace_ui::sticky_mods(app, ui.input(|i| i.modifiers)))
         {
-            // Over the ants with a marquee or lasso: a press drags the selection.
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+            // Over a selection (Photoshop's cursors): the move cursor where a press drags the
+            // outline (#1428), the arrow with a badge for what a press does to the selected
+            // pixels, a hollow arrowhead while they are dragged, a plain arrow over a floating
+            // piece.
+            let icon = match c {
+                SelCursor::Outline => egui::CursorIcon::Move,
+                SelCursor::Dragging => {
+                    // The tip of the arrowhead is at (4, 4) of its 24-unit box.
+                    crate::icons::cursor(ui.ctx(), "mouse-pointer-2", p, vec2(4.0, 4.0) / 24.0, 18.0);
+                    egui::CursorIcon::None
+                }
+                SelCursor::Piece => egui::CursorIcon::Default,
+                SelCursor::Cut => {
+                    crate::icons::cursor_badge(ui.ctx(), "scissors", p);
+                    egui::CursorIcon::Default
+                }
+                SelCursor::Copy => {
+                    crate::icons::cursor_copy_badge(ui.ctx(), p);
+                    egui::CursorIcon::Default
+                }
+            };
+            ui.ctx().set_cursor_icon(icon);
         } else if let Some(p) = response.hover_pos() {
             let alt = ui.input(|i| i.modifiers.alt);
             if !resizing && !alt && !app.ui.shell.sticky_alt {
@@ -2688,6 +2711,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             crate::stroke_constraint::draw_line_preview(app, &painter, &xf, p, tool, held.shift);
         }
     }
+    app.tool_override = None;
     // Scrollbars (scrollbars.rs): drawn over the canvas edges, they take the pointer there.
     let t0 = crate::gpu_canvas::now_ms();
     let before = view.center;
@@ -3139,7 +3163,7 @@ pub(crate) fn pipette_cursor(ctx: &egui::Context, p: Pos2) -> egui::CursorIcon {
 /// painting and sampling.
 fn alt_eyedropper(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
     if matches!(ev, ToolEvent::Down { .. }) {
-        app.alt_sampling = alt_samples(app.ui.tool, mods);
+        app.alt_sampling = alt_samples(app.active_tool(), mods);
     }
     if !app.alt_sampling {
         return false;
@@ -3176,7 +3200,7 @@ pub(crate) fn composite_color(app: &mut PhotocraftApp, x: f64, y: f64) -> Option
 /// on. It does not feed the live stroke, so the canvas can push a whole frame's recovered samples
 /// and update the live stroke once (see `canvas_view`).
 fn tool_move(app: &mut PhotocraftApp, x: f64, y: f64, pressure: f32, mods: egui::Modifiers) {
-    let tool = app.ui.tool;
+    let tool = app.active_tool();
     if tool.is_type() && app.drag.is_none() {
         crate::type_tool::pointer_move(app, x, y);
     }
@@ -3275,7 +3299,14 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
     if crate::magnetic_lasso_ui::pointer(app, ev, mods) {
         return;
     }
-    let tool = app.ui.tool;
+    // ⌘ held is the Move tool (`hold_keys::cmd_moves`). The canvas resolves the held key before
+    // the event (`tool_override`); automation and tests send the modifier with the event.
+    let tool = match app.active_tool() {
+        t if app.tool_override.is_none() && mods.command && crate::hold_keys::cmd_moves(t) && app.ui.transform.is_none() && app.ui.text_edit.is_none() => {
+            Tool::Move
+        }
+        t => t,
+    };
     if tool == Tool::Eyedropper {
         match ev {
             ToolEvent::Down { x, y, .. } | ToolEvent::Move { x, y, .. } => {
@@ -3285,6 +3316,25 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             ToolEvent::Up { .. } => return,
         }
     }
+    // A locked layer (the Background without a selection, say): no drag, and Photoshop's message
+    // once the pointer moves (a click says nothing). ⌘ with a selection tool here (#896); the Move
+    // tool below, once Auto-Select has picked the layer.
+    match ev {
+        ToolEvent::Down { x, y, .. } if tool != Tool::Move && app.ui.transform.is_none() && crate::move_lock::blocked(app, tool, [x, y], mods) => {
+            app.move_blocked = true;
+            return;
+        }
+        ToolEvent::Move { .. } if app.move_blocked => {
+            app.move_blocked = false;
+            crate::move_lock::prompt(app);
+            return;
+        }
+        ToolEvent::Up { .. } if app.move_blocked => {
+            app.move_blocked = false;
+            return;
+        }
+        _ => {}
+    }
     // Move tool over a guide drags the guide (off the canvas deletes it).
     match ev {
         ToolEvent::Down { x, y, pressure } if tool == Tool::Move => {
@@ -3292,8 +3342,20 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
                 app.guide_drag = Some(crate::rulers::GuideDrag { vertical, index: Some(i), pos: if vertical { x } else { y } });
                 return;
             }
+            // Auto-Select (or ⌘-click while it is off) picks the layer under the pointer first
+            // (not when the selected pixels move: those are the active layer's).
+            if !crate::move_ui::moves_selected_pixels(app) && app.ui.tool_options.move_auto_select != mods.command {
+                let target = app.ui.tool_options.move_target.clone();
+                let mode = if mods.shift { "add" } else { "replace" };
+                let _ = app.run("layer.pickAt", json!({"x": x, "y": y, "target": target, "mode": mode}));
+            }
+            // A locked layer: no drag, and Photoshop's message once the pointer moves (`move_lock`).
+            if crate::move_lock::blocked(app, tool, [x, y], mods) {
+                app.move_blocked = true;
+                return;
+            }
             // With a selection: cut the selected pixels (⌥ copies them) and drag them as a floating
-            // piece, from anywhere, as a marquee ⌘-drag does (no Auto-Select pick).
+            // piece, from anywhere, as a marquee ⌘-drag does.
             if crate::move_ui::moves_selected_pixels(app) {
                 if crate::move_ui::float_selected(app, mods.alt, 0.0, 0.0) {
                     let mut d = Drag::new(tool, [x, y], vec![[x, y, pressure as f64]], mods, false);
@@ -3301,12 +3363,6 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
                     app.drag = Some(d);
                 }
                 return;
-            }
-            // Auto-Select (or ⌘-click while it is off) picks the layer under the pointer first.
-            if app.ui.tool_options.move_auto_select != mods.command {
-                let target = app.ui.tool_options.move_target.clone();
-                let mode = if mods.shift { "add" } else { "replace" };
-                let _ = app.run("layer.pickAt", json!({"x": x, "y": y, "target": target, "mode": mode}));
             }
         }
         ToolEvent::Move { x, y, .. } => {
@@ -3548,10 +3604,59 @@ pub fn selection_drag_kind(app: &PhotocraftApp, tool: Tool, p: [f64; 2], mods: e
 /// Does a ⌘ (⌘⌥) press with selection tool `tool` at `p` move the whole layer (a duplicate with
 /// ⌥), as the Move tool would? Outside the selection or without one; inside it, ⌘ drags the
 /// selected pixels instead (`selection_drag_kind`).
-fn command_moves_layer(app: &PhotocraftApp, tool: Tool, p: [f64; 2], mods: egui::Modifiers) -> bool {
+pub(crate) fn command_moves_layer(app: &PhotocraftApp, tool: Tool, p: [f64; 2], mods: egui::Modifiers) -> bool {
     let selection_tool = matches!(tool, Tool::RectMarquee | Tool::EllipseMarquee | Tool::Lasso | Tool::PolygonLasso | Tool::MagicWand);
     let floating = app.session.active().is_some_and(|st| photocraft_engine::float_cmds::floating(st).is_some());
     selection_tool && mods.command && !mods.shift && !floating && app.ui.polygon.is_empty() && !inside_selection(app, p)
+}
+
+/// Photoshop's cursor over a selection: what a press (or the drag under way) would do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelCursor {
+    /// A marquee or lasso inside the selection moves the outline (the move cursor, #1428), also
+    /// while it is being dragged.
+    Outline,
+    /// Arrow with scissors: the Move tool (⌘ with a marquee) cuts and moves the selected pixels.
+    Cut,
+    /// Arrow with a second arrow: ⌥ lifts a copy of them instead.
+    Copy,
+    /// Plain arrow: a floating piece, moved again by a plain drag until it is dropped.
+    Piece,
+    /// Hollow arrowhead: the selected pixels are being dragged.
+    Dragging,
+}
+
+/// The cursor at document point `p` with `tool` in effect and `mods` held (`None`: not over a
+/// selection the press would move). The Move tool moves the selected pixels from anywhere
+/// (`move_ui::moves_selected_pixels`); a selection tool from inside the selection, or on the
+/// floating piece (`selection_drag_kind`).
+pub fn selection_cursor(app: &PhotocraftApp, tool: Tool, p: [f64; 2], mods: egui::Modifiers) -> Option<SelCursor> {
+    if let Some(d) = &app.drag {
+        return match d.sel_move {
+            Some(true) => Some(SelCursor::Dragging),
+            Some(false) => Some(SelCursor::Outline),
+            None => None,
+        };
+    }
+    let floating = app.session.active().and_then(photocraft_engine::float_cmds::floating).is_some();
+    let pixels = if tool == Tool::Move {
+        crate::move_ui::moves_selected_pixels_with(app, tool)
+    } else {
+        match selection_drag_kind(app, tool, p, mods)? {
+            false => return Some(SelCursor::Outline),
+            true => true,
+        }
+    };
+    if !pixels {
+        return None;
+    }
+    // ⌥ (⌘⌥ with a selection tool) floats a copy, of the layer's pixels or of the piece.
+    let copy = mods.alt && (tool == Tool::Move || mods.command);
+    Some(match (floating, copy) {
+        (_, true) => SelCursor::Copy,
+        (true, false) => SelCursor::Piece,
+        (false, false) => SelCursor::Cut,
+    })
 }
 
 /// Whole-pixel offset of a selection drag in progress (`Drag::sel_move`).
