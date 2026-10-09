@@ -181,7 +181,7 @@ fn collapse_all_groups_from_the_panel_menu_and_it_is_saved() {
 
 /// Dragging down the eye column hides (or shows) every layer swept over, in one history step, and
 /// never reorders the layers, even when one pointer move jumps several rows; a hidden layer's eye
-/// box is empty and a click shows it again.
+/// is struck out and a click shows it again.
 #[test]
 fn dragging_down_the_eyes_sweeps_visibility_without_reordering() {
     for moves in [10, 1] {
@@ -216,7 +216,7 @@ fn dragging_down_the_eyes_sweeps_visibility_without_reordering() {
         assert_eq!(order(&h), before, "{moves} moves: an eye drag never reorders the layers");
         assert_eq!(steps(&h), steps_before + 1, "{moves} moves: the whole sweep is one history step");
         assert_eq!(h.state().session.active().unwrap().history.undo_label(), Some("Layer Visibility"));
-        // A click on the (empty) eye box of a hidden layer shows it again.
+        // A click on the struck-out eye of a hidden layer shows it again.
         let p = eye(&recorded(&h.ctx)[1]);
         click(&mut h, p);
         assert!(visible(&h, rows[1].layer));
