@@ -58,8 +58,28 @@ CRAFT_FONTS_DIR="$PWD/../craft-fonts" cargo test --workspace     # runs the Japa
 - `crates/text/build.rs` reads `$CRAFT_FONTS_DIR/fonts/manifest.txt` and embeds the fonts as `photocraft_text::CRAFT_FONTS` (`crates/text/src/craft_fonts.rs`). Unset, `CRAFT_FONTS` is empty and the build is unchanged. A bad path is a build warning, or an error with `CRAFT_FONTS_REQUIRED=1` (release builds set both).
 - **UI:** the Japanese fonts (BIZ UDPGothic Regular first) are the first Japanese fallback in the lazy CJK loader (`crates/ui-egui/src/cjk_fonts.rs`), ahead of the system Japanese fonts and in the same locale script order, appended last to every egui family with the usual baseline alignment.
 - **Type tool:** the text engine registers them in `FontDb::new` (so also with no system fonts) and puts them first in the Japanese slot of the locale-ordered fallback list: BIZ UDPGothic for sans runs, Shippori Mincho / BIZ UDMincho for serif runs.
-- **Web:** the wasm32 build never embeds craft-fonts, even with `CRAFT_FONTS_DIR` set: measured on 2026-10-06, the UI face alone took the release wasm from 24.19 MB to 28.87 MB, over the 24 MiB gate in `packaging/web/package.sh`. The web build therefore has no Japanese font yet (loading craft-fonts next to the wasm at run time would be the way to add one).
+- **Web:** the wasm32 build never embeds craft-fonts, even with `CRAFT_FONTS_DIR` set: measured on 2026-10-06, the UI face alone took the release wasm from 24.19 MB to 28.87 MB, over the 24 MiB gate in `packaging/web/package.sh`. It fetches the faces in `crates/text/web-fonts.txt` from beside the wasm at run time instead (see below); Japanese isn't in that list yet.
 - Tests that need the fonts skip with a message when `CRAFT_FONTS` is empty; CI's Linux job runs the tests a second time with `CRAFT_FONTS_DIR` set. Desktop releases check out craft-fonts at the commit pinned in `.github/workflows/release.yml` (`CRAFT_FONTS_REF`; ci.yml pins the same commit) and ship each font's `OFL.txt` as `OFL-<family>.txt`.
+
+### Arabic fonts and the web build
+
+Desktop builds register craft-fonts' Arabic families (Noto Sans Arabic is the Arabic fallback via
+`FALLBACK_CANDIDATES`; the others are picked by name).
+
+The web build embeds no craft fonts (wasm size gate). Instead `crates/text/web-fonts.txt` lists the
+faces it fetches from beside the wasm, `startup` (before the app starts) or `background` (after):
+
+- `crates/text/build.rs` turns it into `photocraft_text::WEB_FONTS` (URL `fonts/<sha16>/<file>`
+  and the SRI hash).
+- `cargo xtask web-fonts` (`xtask/src/web_fonts.rs`), the Trunk `post_build` hook, copies the files,
+  checking each one's SHA-256. A listed face the checkout lacks is skipped with a warning, as in
+  `build.rs`, so an older craft-fonts just means fewer fonts.
+- `apps/photocraft-web/src/fonts.rs` fetches and registers them, logging `web font …` for failures.
+- `FontDb::generation()` changes as they arrive, and the Type tool's font list and layout cache key
+  on it.
+
+Try it: `cd apps/photocraft-web && CRAFT_FONTS_DIR=/abs/path/to/craft-fonts trunk serve`. To serve
+another face on the web (e.g. BIZ UDPGothic for Japanese), add a line to `web-fonts.txt`.
 
 ## Graphics startup and device loss
 
@@ -328,7 +348,9 @@ trunk build --release              # writes ../../dist/web (index.html, .js glue
 trunk serve --release              # dev server on http://127.0.0.1:8765
 ```
 
-Any static file server works for `dist/web`, for example `python3 -m http.server 8765` run inside that directory. Trunk downloads the matching `wasm-bindgen` and `wasm-opt` itself. `trunk build --release` uses the `wasm-release` Cargo profile (`data-cargo-profile` in `index.html`: fat LTO, opt-level "s" except the pixel crates). The `.wasm` is about 18.8 MiB raw, 7.8 MiB gzipped and 5.6 MiB with Brotli; serve it with compression. Keep it under 24 MiB (`packaging/web/package.sh` enforces this; Cloudflare's per-file cap is 25 MiB). The web build never embeds craft-fonts (see Fonts above). To see where the bytes go, run `twiggy top -n 40` on `target/wasm32-unknown-unknown/wasm-release/photocraft-web.wasm` (before wasm-opt strips the names).
+Any static file server works for `dist/web`, for example `python3 -m http.server 8765` run inside that directory. Trunk downloads the matching `wasm-bindgen` and `wasm-opt` itself. `trunk build --release` uses the `wasm-release` Cargo profile (`data-cargo-profile` in `index.html`: fat LTO, opt-level "s" except the pixel crates). The `.wasm` is about 18.8 MiB raw, 7.8 MiB gzipped and 5.6 MiB with Brotli; serve it with compression. Keep it under 24 MiB (`packaging/web/package.sh` enforces this; Cloudflare's per-file cap is 25 MiB). The web build never embeds craft-fonts (see Fonts above).
+
+What the web build needs: `trunk`, the `wasm32-unknown-unknown` target and `cargo`, nothing else (no POSIX shell, so it works the same on Windows). Optionally, `CRAFT_FONTS_DIR` set to an absolute craft-fonts checkout adds the fonts the site serves beside the wasm: Trunk's `post_build` hook runs `cargo xtask web-fonts`, which copies them into `dist/web/fonts/` (it does nothing without `CRAFT_FONTS_DIR`, and skips with a warning any listed face an older checkout lacks). See Fonts › Arabic fonts and the web build. To see where the bytes go, run `twiggy top -n 40` on `target/wasm32-unknown-unknown/wasm-release/photocraft-web.wasm` (before wasm-opt strips the names).
 
 URL flags: `?webgl` forces the WebGL2 backend, and `?cpu` forces the CPU canvas path.
 
