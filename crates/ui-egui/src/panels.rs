@@ -1839,11 +1839,10 @@ fn layer_row(
     // The eye takes drags too (so a drag starting on it never reorders the row): dragging down
     // the eyes gives every row swept over the visibility the first eye toggled to.
     let eye_resp = ui.interact(eye, ui.id().with(("eye", l.id.0)), Sense::click_and_drag());
-    // A hidden layer's eye box is left empty (still clickable).
-    if l.visible {
-        // Centre the drawing in the column while preserving the visibility hit area.
-        icons::paint(ui, eye_cell, "eye", 15.0, t.layer_label_icon(l.label));
-    }
+    // Always show the eye icon, switching it based on visibility.
+    let eye_icon = if l.visible { "eye" } else { "eye-off" };
+    let eye_color = if l.visible { t.layer_label_icon(l.label) } else { t.text_faint };
+    icons::paint(ui, eye_cell, eye_icon, 15.0, eye_color);
     eye_sweep(ctx, l, rect, &eye_resp, actions);
     if eye_resp.clicked() {
         // ⌥-click shows only this layer; ⌥-click it again to restore the others.
