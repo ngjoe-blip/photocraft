@@ -280,21 +280,44 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if focus == Focus::None && crate::move_mods::arrow_keys(app, ctx) {
         return;
     }
-    // Pen path in progress: ↩ finishes (open path), Esc cancels.
-    if app.ui.pen.is_some() {
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
-            crate::vector_ui::pen_commit(app, false);
-            return;
+    // Moved pixels still floating: ↩ drops them.
+    if focus == Focus::None
+        && app.session.active().is_some_and(|st| photocraft_engine::float_cmds::floating(st).is_some())
+        && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+    {
+        if let Err(e) = app.run("select.drop", json!({})) {
+            app.ui.status = e;
+            app.ui.status_error = true;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-            app.ui.pen = None;
-            return;
-        }
+        return;
+    }
+    // Pen path in progress: ↩ and Esc both end it as an open path and keep it, as in Photoshop (#1769).
+    if app.ui.pen.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter) || i.consume_key(Modifiers::NONE, Key::Escape)) {
+        crate::vector_ui::pen_commit(app, false);
+        return;
     }
     // Magnetic Lasso: ↩ closes, Esc cancels, ⌫ removes a fastening point (not Edit › Clear),
     // [ ] change the detection width (not the brush size).
     if crate::magnetic_lasso_ui::keys(app, ctx) {
         return;
+    }
+    // While placing polygonal lasso vertices, Backspace/Delete retracts the last point;
+    // it must win over the regular Edit › Clear shortcut, which edits document pixels.
+    if crate::lasso_ui::waiting_for_vertex(app) {
+        let mods = ctx.input(|i| i.modifiers);
+        if !mods.command && !mods.ctrl && !mods.shift && ctx.input_mut(|i| i.consume_key(mods, Key::Backspace) || i.consume_key(mods, Key::Delete)) {
+            crate::lasso_ui::undo_last_vertex(app);
+            return;
+        }
+    }
+    // The Polygonal Lasso tool likewise: ⌫/Delete removes the last vertex (#1229), and never
+    // reaches Edit › Clear while a polygon is being drawn.
+    if !app.ui.polygon.is_empty() {
+        let mods = ctx.input(|i| i.modifiers);
+        if !mods.command && !mods.ctrl && !mods.shift && ctx.input_mut(|i| i.consume_key(mods, Key::Backspace) || i.consume_key(mods, Key::Delete)) {
+            crate::canvas::polygon_retract(app);
+            return;
+        }
     }
     // Inline type editing eats text and navigation keys; ⌘-shortcuts still reach the menus.
     let editing = crate::type_tool::handle_keys(app, ctx);

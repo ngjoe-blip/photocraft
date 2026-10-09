@@ -656,6 +656,10 @@ pub fn run(app: &mut PhotocraftApp, ctx: &egui::Context) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             continue;
         }
+        // The rows are disabled while a dialog is open; a click that raced the update is dropped.
+        if !crate::menus::modal_allows(app, &id) {
+            continue;
+        }
         if let Err(e) = crate::menus::invoke(app, ctx, &id, serde_json::json!({})) {
             app.ui.status = e;
             app.ui.status_error = true;
@@ -674,7 +678,11 @@ pub fn sync(app: &mut PhotocraftApp, ctx: &egui::Context) {
         return;
     }
     let lang = crate::i18n::current();
-    let layout = photocraft_layout(&crate::menus::menu_items(app), lang, &app.session.prefs().interface.language);
+    let mut items = crate::menus::menu_items(app);
+    for it in &mut items {
+        it.enabled &= crate::menus::modal_allows(app, &it.id);
+    }
+    let layout = photocraft_layout(&items, lang, &app.session.prefs().interface.language);
     let Some(menu) = app.services.native_menu.as_mut() else { return };
     if !menu.logged {
         for c in &layout.clashes {
@@ -702,6 +710,7 @@ fn state_hash(app: &PhotocraftApp, input: Option<u64>) -> u64 {
     }
     let ui = &app.ui;
     (&ui.recent_files, &ui.workspace, ui.palette_open, ui.transform.is_some(), ui.text_edit.is_some(), ui.dialogs.len()).hash(&mut h);
+    (app.discard.is_some(), app.camera_raw.is_some()).hash(&mut h);
     serde_json::to_string(&(&ui.panels, &ui.extras, &ui.view, ui.theme, ui.tool)).unwrap_or_default().hash(&mut h);
     s.prefs().interface.language.hash(&mut h);
     h.finish()
@@ -956,6 +965,38 @@ mod tests {
         assert_eq!(app.ui.panels.layers, !before);
         let bar = synced.borrow().last().cloned().unwrap();
         assert_eq!(bar.find("window.panel.layers").unwrap().checked, Some(!before));
+    }
+
+    /// #1354: a dialog is modal for the menu bar too. Its rows are disabled (view navigation
+    /// aside), and a click that arrives anyway doesn't run under the dialog.
+    #[test]
+    fn an_open_dialog_blocks_menu_clicks_except_view_navigation() {
+        let synced = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = app(true);
+        let ctx = egui::Context::default();
+        crate::menus::invoke(&mut app, &ctx, "image.imageSize", json!({})).unwrap();
+        assert!(!app.ui.dialogs.is_empty(), "Image Size opened its dialog");
+        let size = |app: &PhotocraftApp| app.session.active().map(|d| (d.doc.size.width, d.doc.size.height));
+        let zoom = app.ui.views[0].zoom;
+        let events = vec![Event::Click("image.imageRotation.90cw".into()), Event::Click("view.zoomIn".into())];
+        app.services.native_menu = Some(NativeMenu::new(Box::new(Fake { synced: synced.clone(), events })));
+        let mut raw = egui::RawInput::default();
+        if let Some(m) = app.services.native_menu.as_mut() {
+            m.raw_input(&mut raw);
+        }
+        frame(&ctx, raw, |ui| {
+            run(&mut app, ui.ctx());
+            sync(&mut app, ui.ctx());
+        });
+        assert_eq!(size(&app), Some((64, 48)), "the rotation didn't run under the dialog");
+        assert!(app.ui.views[0].zoom > zoom, "Zoom In still works under a dialog");
+        let bar = synced.borrow().last().cloned().unwrap();
+        assert!(!bar.find("image.imageRotation.90cw").unwrap().enabled);
+        assert!(bar.find("view.zoomIn").unwrap().enabled);
+        // With the dialog closed the rows come back and a click runs.
+        app.ui.dialogs.clear();
+        frame(&ctx, egui::RawInput::default(), |ui| sync(&mut app, ui.ctx()));
+        assert!(synced.borrow().last().unwrap().find("image.imageRotation.90cw").unwrap().enabled);
     }
 
     /// With the Mac menu bar the title bar draws no menu titles: each title shows once fewer.
