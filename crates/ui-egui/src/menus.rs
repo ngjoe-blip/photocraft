@@ -10,6 +10,7 @@ pub const TOP_MENUS: [&str; 10] = ["File", "Edit", "Image", "Layer", "Type", "Se
 
 /// UI-level commands (handled by the shell rather than the engine): id, label, menu, shortcut.
 pub const UI_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
+    ("ui.symmetryTransform", "Transform Symmetry", &[], None),
     ("file.open", "Open…", &["File"], Some("Cmd+O")),
     ("file.save", "Save", &["File"], Some("Cmd+S")),
     ("file.saveAs", "Save As…", &["File"], Some("Cmd+Shift+S")),
@@ -119,6 +120,9 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Va
 
 /// [`invoke`] without the unsaved-changes prompt, for once the user has already answered it.
 pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    if id == "ui.symmetryTransform" {
+        return crate::symmetry_ui::begin(app).map(|_| Value::Null);
+    }
     // Help › Discord, website, GitHub, Report an Issue.
     if let Some(url) = crate::links::url_for(id) {
         return Ok(crate::links::open(app, ctx, url));
@@ -474,6 +478,9 @@ fn open_path(app: &mut PhotocraftApp, path: &str) -> Result<Value, String> {
 }
 
 pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
+    if id == "ui.symmetryTransform" {
+        return crate::symmetry_ui::can_transform(app);
+    }
     // Photoshop greys these for the Background layer, other layer kinds or single-layer documents.
     if crate::enable_rules::disabled(app, id) {
         return false;

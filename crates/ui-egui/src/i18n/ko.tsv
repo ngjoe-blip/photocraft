@@ -2827,3 +2827,8 @@ fontWeight	Italic	기울임
 	Rotate View Tool	보기 회전 도구
 	Reset View	보기 재설정
 	Drag around the centre to rotate the view  ·  Shift constrains to 15°	중심 주위를 드래그해 보기를 회전합니다  ·  Shift는 15°로 제한
+
+# Painting symmetry presets.
+	Dual Axis	이중 축
+	Diagonal	대각선
+	Transform Symmetry	대칭 변형
