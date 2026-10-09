@@ -96,8 +96,10 @@ pub fn render_tiled(doc: &Document, rect: Rect, tile: i32) -> Buffer {
 
 fn render_tiled_with(doc: &Document, rect: Rect, tile: i32, cx: &Ctx) -> Buffer {
     let tile = tile.max(1);
-    // Lab documents mix Normal blending in CIELAB, as Photoshop does (psblend::LAB_MIX).
+    // Lab documents mix Normal blending in CIELAB, as Photoshop does (psblend::LAB_MIX); 32-bit
+    // ones keep values above 1 in the non-separable modes (psblend::FLOAT_DOC).
     let lab = doc.mode == photocraft_color::ColorMode::Lab;
+    let float = doc.depth == photocraft_color::SampleType::F32;
     // CMYK layers are read through the document's own CMYK profile (thread-local scope).
     let cmyk = cmyk_space(doc);
     let cmyk = cmyk.as_ref();
@@ -107,26 +109,18 @@ fn render_tiled_with(doc: &Document, rect: Rect, tile: i32, cx: &Ctx) -> Buffer 
     if rect.width() as i32 <= tile && rect.height() as i32 <= tile {
         return photocraft_color::convert::with_cmyk_space(cmyk, || {
             let mut buf = multichannel::backdrop(doc, rect);
-            psblend::LAB_MIX.with(|l| l.set(lab));
-            composite_stack_at(&doc.layers, &mut buf, cx, advanced::Scope::ROOT);
-            psblend::LAB_MIX.with(|l| l.set(false));
+            psblend::with_document(lab, float, || composite_stack_at(&doc.layers, &mut buf, cx, advanced::Scope::ROOT));
             buf
         });
     }
     // Effect maps are built once, here, before any tile needs them (#276).
     prepare_effects(&doc.layers, rect, cx, |f| {
-        photocraft_color::convert::with_cmyk_space(cmyk, || {
-            psblend::LAB_MIX.with(|l| l.set(lab));
-            f();
-            psblend::LAB_MIX.with(|l| l.set(false));
-        });
+        photocraft_color::convert::with_cmyk_space(cmyk, || psblend::with_document(lab, float, f));
     });
     let run = |t: Rect| {
         photocraft_color::convert::with_cmyk_space(cmyk, || {
             let mut b = multichannel::backdrop(doc, t);
-            psblend::LAB_MIX.with(|l| l.set(lab));
-            composite_stack_at(&doc.layers, &mut b, cx, advanced::Scope::ROOT);
-            psblend::LAB_MIX.with(|l| l.set(false));
+            psblend::with_document(lab, float, || composite_stack_at(&doc.layers, &mut b, cx, advanced::Scope::ROOT));
             b
         })
     };
