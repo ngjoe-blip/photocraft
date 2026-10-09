@@ -76,6 +76,21 @@ thread_local! {
     /// (Photoshop composites Lab documents in Lab; an anti-aliased edge between two colours
     /// differs by up to 14 / 255 from an sRGB mix: psd-tools stroke-color-descriptors-lab).
     pub static LAB_MIX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set while rendering a 32-bit document: its values above 1 are valid light, so Hue,
+    /// Saturation, Color and Luminosity keep them instead of clipping at 1
+    /// ([`generic::blend_rgb_within`]).
+    pub static FLOAT_DOC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with this thread's document blending settings ([`LAB_MIX`], [`FLOAT_DOC`]) set,
+/// restoring the previous ones afterwards (a rayon worker waiting inside one tile can run
+/// another tile's `f`, which must not reset the first one's settings).
+pub fn with_document<R>(lab: bool, float: bool, f: impl FnOnce() -> R) -> R {
+    let prev = (LAB_MIX.replace(lab), FLOAT_DOC.replace(float));
+    let r = f();
+    LAB_MIX.set(prev.0);
+    FLOAT_DOC.set(prev.1);
+    r
 }
 
 /// `B(Cb, Cs)` with Photoshop's variants.
@@ -85,7 +100,7 @@ pub fn blend_rgb(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
         BlendMode::HardMix => std::array::from_fn(|i| hard_mix_ps(cb[i], cs[i])),
         BlendMode::ColorBurn => std::array::from_fn(|i| color_burn(cb[i], cs[i])),
         BlendMode::ColorDodge => std::array::from_fn(|i| color_dodge(cb[i], cs[i])),
-        m => generic::blend_rgb(m, cb, cs),
+        m => generic::blend_rgb_within(m, cb, cs, if FLOAT_DOC.get() { f32::MAX } else { 1.0 }),
     }
 }
 
@@ -241,6 +256,20 @@ mod tests {
         assert_eq!(color_dodge(1e-6, 1.0), 0.0);
         assert!((color_burn(0.5, 0.5) - 0.0).abs() < 1e-6);
         assert!((color_dodge(0.25, 0.5) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn document_settings_nest_and_restore() {
+        let bright = |m| blend_rgb(m, [0.5, 0.5, 0.5], [1.0, 0.0, 0.0])[0];
+        with_document(true, true, || {
+            // A 32-bit document keeps Color's red above 1.
+            assert!(bright(BlendMode::Color) > 1.1);
+            // Another tile's (or document's) scope run inside this one doesn't reset it.
+            with_document(false, false, || assert!(bright(BlendMode::Color) <= 1.0));
+            assert!(LAB_MIX.get() && FLOAT_DOC.get());
+        });
+        assert!(!LAB_MIX.get() && !FLOAT_DOC.get());
+        assert!(bright(BlendMode::Color) <= 1.0);
     }
 
     #[test]
