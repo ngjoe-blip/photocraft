@@ -1,6 +1,6 @@
-//! Community and project links: the Help menu, the About dialog, the start screen and the title
-//! bar all open these. URLs follow the crafting-app pattern (`getartcraft.com/apps/<app>`,
-//! `github.com/storytold/<app>`).
+//! Community and project links: the Help menu opens these as commands, and the About dialog and
+//! the start screen show them as the modest [`link_row`]. URLs follow the crafting-app pattern
+//! (`getartcraft.com/apps/<app>`, `github.com/storytold/<app>`).
 
 use serde_json::{Value, json};
 
@@ -31,24 +31,16 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context, url: &str) -> Value {
     json!({"url": url})
 }
 
-/// The prominent "Join us on Discord" button.
-pub fn discord_button(app: &mut PhotocraftApp, ui: &mut egui::Ui, min_width: f32) -> egui::Response {
-    let r = crate::widgets::primary_button(ui, tl!("Join us on Discord"), min_width).on_hover_text(DISCORD);
-    if r.clicked() {
-        open(app, ui.ctx(), DISCORD);
-    }
-    r
-}
-
-/// "PhotoCraft website · GitHub · ArtCraft" as links, centred. Clicks route through [`open`] (the
-/// platform browser service) rather than `ui.hyperlink_to`, which uses the unreliable `ctx.open_url`.
+/// "Discord · PhotoCraft website · GitHub · ArtCraft" as links, centred. Clicks route through
+/// [`open`] (the platform browser service) rather than `ui.hyperlink_to`, which uses the
+/// unreliable `ctx.open_url`.
 pub fn link_row(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = crate::theme::Tokens::get(ui.ctx());
-    let links = [(tl!("PhotoCraft website"), APP_PAGE), (tl!("GitHub"), GITHUB), (tl!("ArtCraft"), ARTCRAFT_WEBSITE)];
+    let links = [(tl!("Discord"), DISCORD), (tl!("PhotoCraft website"), APP_PAGE), (tl!("GitHub"), GITHUB), (tl!("ArtCraft"), ARTCRAFT_WEBSITE)];
     let font = egui::FontId::proportional(12.5);
     let sep = "  ·  ";
     let width: f32 = links.iter().map(|(l, _)| ui.painter().layout_no_wrap((*l).into(), font.clone(), t.text).size().x).sum::<f32>()
-        + 2.0 * ui.painter().layout_no_wrap(sep.into(), font.clone(), t.text).size().x;
+        + links.len().saturating_sub(1) as f32 * ui.painter().layout_no_wrap(sep.into(), font.clone(), t.text).size().x;
     let mut clicked: Option<&str> = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
@@ -73,7 +65,7 @@ mod tests {
 
     #[test]
     fn links_open_through_the_platform_service() {
-        // Issue #14: links (Help menu, Discord button, start-page links) must open in the browser.
+        // Issue #14: links (Help menu, About/start-page link row) must open in the browser.
         // They route through the `open_url` service rather than the unreliable `ctx.open_url`.
         use std::sync::{Arc, Mutex};
         let opened: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -92,9 +84,48 @@ mod tests {
             crate::menus::invoke(&mut app, &ctx, id, json!({})).unwrap();
             assert_eq!(opened.lock().unwrap().last().map(String::as_str), Some(*url), "{id}");
         }
-        // The direct open() helper (Discord button / start-page links) also uses it.
+        // The direct open() helper (link row) also uses it.
         open(&mut app, &ctx, DISCORD);
         assert_eq!(opened.lock().unwrap().last().map(String::as_str), Some(DISCORD));
+    }
+
+    #[test]
+    fn link_row_carries_the_community_link() {
+        // Issue #1726: Discord left the primary UI as a prominent button; the modest link row
+        // (About dialog, start screen) and Help › Discord carry it now.
+        use egui::{Event, Pos2, RawInput, Rect, Vec2};
+        use std::sync::{Arc, Mutex};
+        let opened: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec = opened.clone();
+        let services = crate::Services {
+            open_url: Some(Box::new(move |u: &str| {
+                rec.lock().unwrap().push(u.to_string());
+                Ok(())
+            })),
+            ..Default::default()
+        };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        let ctx = egui::Context::default();
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 40.0))), ..Default::default() };
+        let mut out = ctx.run_ui(input.clone(), |ui| link_row(&mut app, ui));
+        out.textures_delta.clear();
+        let (pos, size) = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "Discord" => Some((t.pos, t.galley.size())),
+                _ => None,
+            })
+            .expect("the link row shows a Discord text link");
+        let center = pos + size / 2.0;
+        for pressed in [true, false] {
+            input.events = vec![
+                Event::PointerMoved(center),
+                Event::PointerButton { pos: center, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() },
+            ];
+            ctx.run_ui(input.clone(), |ui| link_row(&mut app, ui)).textures_delta.clear();
+        }
+        assert_eq!(opened.lock().unwrap().as_slice(), [DISCORD.to_string()]);
     }
 
     #[test]
